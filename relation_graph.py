@@ -1,10 +1,14 @@
 import math
-import nltk  # used to find edit-distance for user input with all the possible matches in the database
 import mysql.connector
 import operator
+import time
 
 
-def print_int_list(some_list):
+# Convert an integer list into a string of integer list
+# that can be used in MySQL query.
+# A helper function for getting a list of professor ids and their information
+# [1,2,3]  ->  "(1,2,3)"
+def convert_int_list(some_list):
     ret = "("
     for i in some_list:
         ret += str(i)
@@ -14,7 +18,11 @@ def print_int_list(some_list):
     return ret
 
 
-def print_str_list(some_list):
+# Convert a string list into a string of string list
+# that can be used in MySQL query.
+# A helper function for getting a list of professor names and their information
+# ["A", "B", "C"]  ->  "('A','B','C')"
+def convert_str_list(some_list):
     ret = "("
     for i in some_list:
         ret += "'"
@@ -25,6 +33,8 @@ def print_str_list(some_list):
     return ret
 
 
+# The class for node in the relation graph to be constructed
+# Each node is a professor with his/her weighted keywords.
 class Professor:
 
     def __init__(self, name, dict_of_focus_to_weight):
@@ -32,14 +42,15 @@ class Professor:
         self.focus_to_weight_dict = self.update_to_standard_dict(dict_of_focus_to_weight.copy())
         self.adjacent = {}  # neighbor node  ->  edge weight
 
-        # so the sum of all the weights of key-words for a professor is 100
-
-    @staticmethod  # And we only consider the top ten weighted keywords
+    # so the sum of all the weights of key-words for a professor is 100
+    # And we only consider the top ten weighted keywords
+    @staticmethod
     def update_to_standard_dict(diction):
-        if len(diction) <= 10:
+        # Only take the top 20 weighted keywords of each professor for this whole program
+        if len(diction) <= 20:
             opt_dict = diction.copy()
         else:
-            opt_dict = dict(sorted(diction.items(), key=operator.itemgetter(1), reverse=True)[:10])
+            opt_dict = dict(sorted(diction.items(), key=operator.itemgetter(1), reverse=True)[:20])
         total = sum(opt_dict.values())
         for k in opt_dict.keys():
             opt_dict[k] = opt_dict[k] / total
@@ -67,7 +78,7 @@ class Graph:
     def __init__(self, fos_cursor, npmi_cursor):
         self.prof_name_dict = {}  # professor name string  ->  professor node
         self.num_vertices = 0
-        self.focus_to_prof_names_dict = {}  # research focus string  ->  list of professor name strings
+        self.focus_to_prof_names_dict = {}  # focus string  ->  list of professor name strings
         self.fos_cursor = fos_cursor  # dataset about professors recorded
         self.npmi_cursor = npmi_cursor  # dataset about similarity between two words
         self.construct_graph()
@@ -87,11 +98,14 @@ class Graph:
             ret += "} \n"
         return ret
 
+    # Add the new professor as a node in the relation graph
+    # Use the calc_distance function to find the distance of current professor to all the others
+    # Then connect the edges.
     def add_professor_node(self, name, dict_of_focus_to_weight):
         self.num_vertices += 1
         new_vertex = Professor(name, dict_of_focus_to_weight)
         self.prof_name_dict[name] = new_vertex
-        for focus in dict_of_focus_to_weight.keys():
+        for focus in new_vertex.focus_to_weight_dict.keys():
             if focus not in self.focus_to_prof_names_dict:
                 self.focus_to_prof_names_dict[focus] = [name]
             else:
@@ -103,6 +117,8 @@ class Graph:
             self.add_edge(name, other_prof, edge_weight)
         return new_vertex
 
+    # Fetch all the professors and their weighted focus in the database
+    # Add them to the relation graph as individual nodes using the add_professor_node() function
     def construct_graph(self):
         self.fos_cursor.execute("SELECT name FROM Professor")
         list_of_professors = list(self.fos_cursor.fetchall())
@@ -118,6 +134,7 @@ class Graph:
     def get_vertices(self):
         return self.prof_name_dict.keys()
 
+    # return the node object with professor name n
     def get_professor_node(self, n):
         return self.prof_name_dict[n]
 
@@ -125,30 +142,10 @@ class Graph:
         self.prof_name_dict[frm].adjacent[to] = cost
         self.prof_name_dict[to].adjacent[frm] = cost
 
-    # return the distance between two professor nodes based on their key words
-    def calc_distance(self, prof_node1, prof_node2):
-        value = 200
-        focus1 = prof_node1.get_focuses()
-        focus2 = prof_node2.get_focuses()
-        focus1_list = print_str_list(focus1)
-        focus2_list = print_str_list(focus2)
-        self.npmi_cursor.execute("SELECT * FROM fos WHERE FoS_name in " + focus1_list)
-        id1 = self.npmi_cursor.fetchall()
-        self.npmi_cursor.execute("SELECT * FROM fos WHERE FoS_name in " + focus2_list)
-        id2 = self.npmi_cursor.fetchall()
-        id1 = {a[0]: a[1] for a in id1}
-        id2 = {a[0]: a[1] for a in id2}
-        id1_list = print_int_list(id1.keys())
-        id2_list = print_int_list(id2.keys())
-        self.npmi_cursor.execute("SELECT id1, id2, npmi FROM fos_npmi_springer " +
-                                 "WHERE (id1 in " + id1_list + " AND id2 in " + id2_list + " )")
-        sim_pairs = self.npmi_cursor.fetchall()
-        sim_dict = {}
-        for p in sim_pairs:
-            sim_dict[(p[0], p[1])] = p[2]
-        for a in id1.keys():
+    def calc_distance_helper(self, prof_node1, sim_dict, id_name1, id_name2, value):
+        for a in id_name1.keys():
             max_factor = 0
-            for b in id2.keys():
+            for b in id_name2.keys():
                 if (a, b) in sim_dict:
                     s_score = sim_dict[(a, b)]
                 elif (b, a) in sim_dict:
@@ -159,29 +156,50 @@ class Graph:
                     s_score = 0
                 if s_score > max_factor:
                     max_factor = s_score
-            if id1[a] not in prof_node1.get_focuses():
+            if id_name1[a] not in prof_node1.get_focuses():
                 continue
-            value -= max_factor * prof_node1.get_focus_weight(id1[a])
-        for b in id2.keys():
-            max_factor = 0
-            for a in id1.keys():
-                if (b, a) in sim_dict:
-                    s_score = sim_dict[(b, a)]
-                elif (a, b) in sim_dict:
-                    s_score = sim_dict[(a, b)]
-                elif a == b:
-                    s_score = 1
-                else:
-                    s_score = 0
-                if s_score > max_factor:
-                    max_factor = s_score
-            if id2[b] not in prof_node2.get_focuses():
-                continue
-            value -= max_factor * prof_node2.get_focus_weight(id2[b])
+            value -= max_factor * prof_node1.get_focus_weight(id_name1[a])
+        return value
+
+    # Return the distance between two professor nodes based on their key words and NPMI scores
+    # The algorithm goes as follows:
+    # The initial distance between any two professors is 200
+    # For each keyword for each professor, compare it to all the keywords in the other professor
+    # Then take the largest NPMI score (highest semantic similarity), a float between 0 and 1
+    # Multiply this score with its weight in its corresponding professor, which should be from 0 to 100
+    # Subtract this result from the initial distance
+    # After running the above steps for all keywords, we will get a distance between this pair of professors
+    # Which is certainly to be in the range of 0 to 200
+    def calc_distance(self, prof_node1, prof_node2):
+        focus1 = prof_node1.get_focuses()
+        focus2 = prof_node2.get_focuses()
+        focus1_list = convert_str_list(focus1)
+        focus2_list = convert_str_list(focus2)
+        self.npmi_cursor.execute("SELECT * FROM fos WHERE FoS_name in " + focus1_list)
+        id_name1 = self.npmi_cursor.fetchall()
+        self.npmi_cursor.execute("SELECT * FROM fos WHERE FoS_name in " + focus2_list)
+        id_name2 = self.npmi_cursor.fetchall()
+
+        id_name1 = {a[0]: a[1] for a in id_name1}
+        id_name2 = {a[0]: a[1] for a in id_name2}  # Dictionary of id to focus for each professor
+        id1_list = convert_int_list(id_name1.keys())
+        id2_list = convert_int_list(id_name2.keys())
+        self.npmi_cursor.execute("SELECT id1, id2, npmi FROM fos_npmi_springer " +
+                                 "WHERE (id1 in " + id1_list + " AND id2 in " + id2_list + " )")
+        sim_pairs = self.npmi_cursor.fetchall()
+
+        sim_dict = {}  # Dictionary of every pair of focuses and their NPMI score
+        for p in sim_pairs:
+            sim_dict[(p[0], p[1])] = p[2]
+        value = self.calc_distance_helper(prof_node1, sim_dict, id_name1, id_name2, 200)
+        value = self.calc_distance_helper(prof_node2, sim_dict, id_name2, id_name1, value)
+
         return round(value, 3)
 
+    # Input a focus, first get all the focuses that have NPMI scores with it greater that 0.2
+    # Find all the professors that have focuses in them, multiply them with their corresponding weights
+    # Then populate the website database with (this focus, a professor, factor of similarity with this professor)
     def populate_for_focus(self, focus):
-        id_focus_dict = {}
         focus_id_dict = {}
         id_factor_dict = {}
         prof_factor_dict = {}
@@ -190,9 +208,9 @@ class Graph:
         if id is None:
             return {}
         id = id[0]
-        self.npmi_cursor.execute("SELECT id1, id2, npmi FROM fos_npmi_springer " +
-                                 "WHERE (id1 = " + str(id) + " OR id2 = " + str(id) + " )" +
-                                 "AND npmi > 0.2")
+        self.npmi_cursor.execute(
+            "SELECT id1, id2, npmi FROM fos_npmi_springer WHERE (id1 = {0} OR id2 = {0}) AND npmi > 0.2".format(
+                str(id)))
         triple = self.npmi_cursor.fetchall()
         id_factor_dict[id] = 1
         for t in triple:
@@ -201,15 +219,16 @@ class Graph:
             else:
                 id_factor_dict[t[0]] = t[2]
         ids = id_factor_dict.keys()
-        ids = print_int_list(ids)
+        ids = convert_int_list(ids)
         self.npmi_cursor.execute("SELECT * FROM fos WHERE id in " + ids)
         pairs = self.npmi_cursor.fetchall()
         for p in pairs:
-            id_focus_dict[p[0]] = p[1]
             focus_id_dict[p[1]] = p[0]
         focuses = focus_id_dict.keys()
-        focuses = print_str_list(focuses)
+        focuses = convert_str_list(focuses)
         self.fos_cursor.execute("SELECT name, keyword FROM Keywords WHERE keyword in " + focuses)
+        # input: data
+        # profA 'information' 50%, npmi(data, information) 0.7 -> ProfA.factor += 0.7 * 50%
         pairs = self.fos_cursor.fetchall()
         for p in pairs:
             node = self.get_professor_node(p[0])
@@ -220,9 +239,9 @@ class Graph:
             factor = id_factor_dict[focus_id_dict[p[1]]]
             if p[0] in prof_factor_dict:
                 tmp = prof_factor_dict[p[0]]
-                prof_factor_dict[p[0]] = max(factor * node.get_focus_weight(p[1]), tmp)
+                prof_factor_dict[p[0]] = round(factor * node.get_focus_weight(p[1]) + tmp, 3)
             else:
-                prof_factor_dict[p[0]] = factor * node.get_focus_weight(p[1])
+                prof_factor_dict[p[0]] = round(factor * node.get_focus_weight(p[1]), 3)
         return prof_factor_dict
 
     @staticmethod
@@ -257,16 +276,6 @@ class Graph:
 
     # input the name of a professor as a string, return related professors as a rank list
     def dijkstra(self, src):
-        if src not in self.prof_name_dict.keys():
-            min_edit_dist = 10.5
-            for name in self.prof_name_dict.keys():
-                if nltk.edit_distance(src, name) < min_edit_dist:
-                    src = name
-                    min_edit_dist = nltk.edit_distance(src, name)
-            if min_edit_dist == 10.5:
-                print("Please add this professor: " + src + " to the database before searching.")
-                return {}
-
         dist_dict = {name: math.inf for name in self.prof_name_dict.keys()}
         dist_dict[src] = 0
         sptset = {name: False for name in self.prof_name_dict.keys()}
@@ -301,6 +310,34 @@ class Graph:
         return rank_list
 
 
+def populate_similar_professors(relation_graph, fos_cursor, fos_data):
+    keyword_list = relation_graph.focus_to_prof_names_dict.keys()
+    keyword_list = set(keyword_list)
+    for k in keyword_list:
+        rank_map = relation_graph.populate_for_focus(k[0])
+        for r in rank_map.keys():
+            try:
+                fos_cursor.execute("INSERT INTO Similar (Keyword, Similar_Prof, Similar_Factor) " +
+                                   "VALUES ('" + k[0] + "', '" + r + "', " + str(rank_map[r]) + " )")
+            except:
+                continue
+    fos_data.commit()
+
+
+def populate_related_professors(relation_graph, fos_cursor, fos_data):
+    for prof in relation_graph.prof_name_dict.keys():
+        relation_list = relation_graph.related_professors(prof)
+        for pair in relation_list:
+            if pair[0] == prof:
+                continue
+            try:
+                fos_cursor.execute("INSERT INTO Related (Prof, Related_Prof, Related_Factor) " +
+                                   "VALUES ('" + prof + "', '" + pair[0] + "', " + str(pair[1]) + " )")
+            except:
+                continue
+    fos_data.commit()
+
+
 if __name__ == '__main__':
     npmi_data = mysql.connector.connect(
         host="localhost",
@@ -322,28 +359,9 @@ if __name__ == '__main__':
     print("relation graph constructed")
 
     # to populate the website database, uncomment the following codes:
-    #
-    # fos_cursor.execute("SELECT keyword FROM Keywords")
-    # rank_list = fos_cursor.fetchall()
-    # for k in rank_list:
-    #     print(k[0])
-    #     rank_map = relation_graph.populate_for_focus(k[0])
-    #     for r in rank_map.keys():
-    #         fos_cursor.execute("INSERT INTO Similar (Keyword, Similar_Prof, Similar_Factor) " +
-    #                            "VALUES ('" + k[0] + "', '" + r + "', " + str(rank_map[r]) + " )")
-    #
-    print(relation_graph.rank_list_of_professors(["security", "data"]))
+    populate_similar_professors(relation_graph, fos_cursor, fos_data)
 
     # to populate the website database, uncomment the following codes:
-    #
-    # for prof in relation_graph.prof_name_dict.keys():
-    #     relation_list = relation_graph.related_professors(prof)
-    #     for pair in relation_list:
-    #         if pair[0] == prof:
-    #             continue
-    #         fos_cursor.execute("INSERT INTO Related (Prof, Related_Prof, Related_Factor) " +
-    #                            "VALUES ('" + prof + "', '" + pair[0] + "', " + str(pair[1]) + " )")
-    print(relation_graph.related_professors("Jiawei Han"))
-    #
+    populate_related_professors(relation_graph, fos_cursor, fos_data)
+
     print(relation_graph)
-    # fos_data.commit()
