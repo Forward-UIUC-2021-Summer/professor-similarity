@@ -355,5 +355,5 @@ if __name__ == '__main__':
     populate_similar_professors(relation_graph, fos_cursor, fos_data)
 
     # to populate the website database, uncomment the following codes:
-    # populate_related_professors(relation_graph, fos_cursor, fos_data)
+    populate_related_professors(relation_graph, fos_cursor, fos_data)
 
