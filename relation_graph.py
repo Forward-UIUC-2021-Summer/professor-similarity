@@ -75,12 +75,12 @@ class Professor:
 
 
 class Graph:
-    def __init__(self, fos_cursor, npmi_cursor):
+    def __init__(self, fos_cursor):
         self.prof_name_dict = {}  # professor name string  ->  professor node
         self.num_vertices = 0
         self.focus_to_prof_names_dict = {}  # focus string  ->  list of professor name strings
         self.fos_cursor = fos_cursor  # dataset about professors recorded
-        self.npmi_cursor = npmi_cursor  # dataset about similarity between two words
+        self.fos_cursor = fos_cursor  # dataset about similarity between two words
         self.construct_graph()
 
     # print the information of the relation graph in a straight-forward way
@@ -175,18 +175,18 @@ class Graph:
         focus2 = prof_node2.get_focuses()
         focus1_list = convert_str_list(focus1)
         focus2_list = convert_str_list(focus2)
-        self.npmi_cursor.execute("SELECT * FROM fos WHERE FoS_name in " + focus1_list)
-        id_name1 = self.npmi_cursor.fetchall()
-        self.npmi_cursor.execute("SELECT * FROM fos WHERE FoS_name in " + focus2_list)
-        id_name2 = self.npmi_cursor.fetchall()
+        self.fos_cursor.execute("SELECT * FROM FoS WHERE FoS_name in " + focus1_list)
+        id_name1 = self.fos_cursor.fetchall()
+        self.fos_cursor.execute("SELECT * FROM FoS WHERE FoS_name in " + focus2_list)
+        id_name2 = self.fos_cursor.fetchall()
 
         id_name1 = {a[0]: a[1] for a in id_name1}
         id_name2 = {a[0]: a[1] for a in id_name2}  # Dictionary of id to focus for each professor
         id1_list = convert_int_list(id_name1.keys())
         id2_list = convert_int_list(id_name2.keys())
-        self.npmi_cursor.execute("SELECT id1, id2, npmi FROM fos_npmi_springer " +
+        self.fos_cursor.execute("SELECT id1, id2, npmi FROM FoS_npmi_Springer " +
                                  "WHERE (id1 in " + id1_list + " AND id2 in " + id2_list + " )")
-        sim_pairs = self.npmi_cursor.fetchall()
+        sim_pairs = self.fos_cursor.fetchall()
 
         sim_dict = {}  # Dictionary of every pair of focuses and their NPMI score
         for p in sim_pairs:
@@ -203,15 +203,14 @@ class Graph:
         focus_id_dict = {}
         id_factor_dict = {}
         prof_factor_dict = {}
-        self.npmi_cursor.execute("SELECT id FROM fos WHERE FoS_name='" + focus + "'")
-        id = self.npmi_cursor.fetchone()
+        self.fos_cursor.execute("SELECT id FROM FoS WHERE FoS_name='" + focus + "'")
+        id = self.fos_cursor.fetchone()
         if id is None:
             return {}
         id = id[0]
-        self.npmi_cursor.execute(
-            "SELECT id1, id2, npmi FROM fos_npmi_springer WHERE (id1 = {0} OR id2 = {0}) AND npmi > 0.2".format(
-                str(id)))
-        triple = self.npmi_cursor.fetchall()
+        self.fos_cursor.execute("SELECT id1, id2, npmi FROM FoS_npmi_Springer "
+                                "WHERE (id1 = %s OR id2 = %s) AND npmi > 0.3", (id, id))
+        triple = self.fos_cursor.fetchall()
         id_factor_dict[id] = 1
         for t in triple:
             if t[0] == id:
@@ -220,28 +219,27 @@ class Graph:
                 id_factor_dict[t[0]] = t[2]
         ids = id_factor_dict.keys()
         ids = convert_int_list(ids)
-        self.npmi_cursor.execute("SELECT * FROM fos WHERE id in " + ids)
-        pairs = self.npmi_cursor.fetchall()
-        for p in pairs:
-            focus_id_dict[p[1]] = p[0]
-        focuses = focus_id_dict.keys()
-        focuses = convert_str_list(focuses)
-        self.fos_cursor.execute("SELECT name, keyword FROM Keywords WHERE keyword in " + focuses)
-        # input: data
-        # profA 'information' 50%, npmi(data, information) 0.7 -> ProfA.factor += 0.7 * 50%
+        self.fos_cursor.execute("SELECT * FROM FoS WHERE id in " + ids)
         pairs = self.fos_cursor.fetchall()
         for p in pairs:
-            node = self.get_professor_node(p[0])
-            if p[1] not in node.get_focuses():
+            focus_id_dict[p[1]] = p[0]
+
+        focuses = focus_id_dict.keys()
+        for f in focuses:
+            try:
+                names = self.focus_to_prof_names_dict[f]
+            except:
                 continue
-            if p[1] not in focus_id_dict:
-                continue
-            factor = id_factor_dict[focus_id_dict[p[1]]]
-            if p[0] in prof_factor_dict:
-                tmp = prof_factor_dict[p[0]]
-                prof_factor_dict[p[0]] = round(factor * node.get_focus_weight(p[1]) + tmp, 3)
-            else:
-                prof_factor_dict[p[0]] = round(factor * node.get_focus_weight(p[1]), 3)
+            for p in names:
+                node = self.get_professor_node(p)
+                if f not in node.get_focuses():
+                    continue
+                factor = id_factor_dict[focus_id_dict[f]]
+                if p in prof_factor_dict:
+                    tmp = prof_factor_dict[p]
+                    prof_factor_dict[p] = round(factor * node.get_focus_weight(f) + tmp, 3)
+                else:
+                    prof_factor_dict[p] = round(factor * node.get_focus_weight(f), 3)
         return prof_factor_dict
 
     @staticmethod
@@ -314,13 +312,15 @@ def populate_similar_professors(relation_graph, fos_cursor, fos_data):
     keyword_list = relation_graph.focus_to_prof_names_dict.keys()
     keyword_list = set(keyword_list)
     for k in keyword_list:
+        print(k)
         rank_map = relation_graph.populate_for_focus(k[0])
         for r in rank_map.keys():
             try:
-                fos_cursor.execute("INSERT INTO Similar (Keyword, Similar_Prof, Similar_Factor) " +
-                                   "VALUES ('" + k[0] + "', '" + r + "', " + str(rank_map[r]) + " )")
+                fos_cursor.execute("INSERT INTO Similar (Keyword, Similar_Prof, Similar_Factor) VALUES " 
+                                   "(%s, %s, %s )", (k[0], r, rank_map[r]))
             except:
-                continue
+                fos_cursor.execute("REPLACE INTO Similar (Keyword, Similar_Prof, Similar_Factor) VALUES "
+                                   "(%s, %s, %s )", (k[0], r, rank_map[r]))
     fos_data.commit()
 
 
@@ -331,22 +331,15 @@ def populate_related_professors(relation_graph, fos_cursor, fos_data):
             if pair[0] == prof:
                 continue
             try:
-                fos_cursor.execute("INSERT INTO Related (Prof, Related_Prof, Related_Factor) " +
-                                   "VALUES ('" + prof + "', '" + pair[0] + "', " + str(pair[1]) + " )")
+                fos_cursor.execute("INSERT INTO Related (Prof, Related_Prof, Related_Factor) VALUES (%s, %s, %s )",
+                                   (prof, pair[0], pair[1]))
             except:
-                continue
+                fos_cursor.execute("REPLACE INTO Related (Prof, Related_Prof, Related_Factor) VALUES (%s, %s, %s )",
+                                   (prof, pair[0], pair[1]))
     fos_data.commit()
 
 
 if __name__ == '__main__':
-    npmi_data = mysql.connector.connect(
-        host="localhost",
-        user="root",
-        password="262956",
-        database="forward",
-    )
-    npmi_cursor = npmi_data.cursor()
-    print("npmi data connected")
     fos_data = mysql.connector.connect(
         host="104.198.163.126",
         user="root",
@@ -354,14 +347,13 @@ if __name__ == '__main__':
         database="project"
     )
     fos_cursor = fos_data.cursor()
-    print("keywords data connected")
-    relation_graph = Graph(fos_cursor, npmi_cursor)
+    print("data base connected")
+    relation_graph = Graph(fos_cursor)
     print("relation graph constructed")
 
     # to populate the website database, uncomment the following codes:
     populate_similar_professors(relation_graph, fos_cursor, fos_data)
 
     # to populate the website database, uncomment the following codes:
-    populate_related_professors(relation_graph, fos_cursor, fos_data)
+    # populate_related_professors(relation_graph, fos_cursor, fos_data)
 
-    print(relation_graph)
