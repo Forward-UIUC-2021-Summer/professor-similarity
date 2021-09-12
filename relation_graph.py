@@ -313,14 +313,14 @@ def populate_similar_professors(relation_graph, fos_cursor, fos_data):
     keyword_list = set(keyword_list)
     for k in keyword_list:
         print(k)
-        rank_map = relation_graph.populate_for_focus(k[0])
+        rank_map = relation_graph.populate_for_focus(k)
         for r in rank_map.keys():
             try:
                 fos_cursor.execute("INSERT INTO Similar (Keyword, Similar_Prof, Similar_Factor) VALUES " 
-                                   "(%s, %s, %s )", (k[0], r, rank_map[r]))
+                                   "(%s, %s, %s )", (k, r, rank_map[r]))
             except:
                 fos_cursor.execute("REPLACE INTO Similar (Keyword, Similar_Prof, Similar_Factor) VALUES "
-                                   "(%s, %s, %s )", (k[0], r, rank_map[r]))
+                                   "(%s, %s, %s )", (k, r, rank_map[r]))
     fos_data.commit()
 
 
